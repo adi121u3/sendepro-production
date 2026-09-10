@@ -77,6 +77,9 @@ def init_db():
 
                 connection.commit()
 
+        from backend.default_templates import install_default_templates_once
+        install_default_templates_once()
+
         logger.info("Database initialized successfully at %s", settings.database_url)
     except Exception as e:
         logger.error("Failed to initialize database: %s", str(e))
