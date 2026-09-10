@@ -136,6 +136,8 @@ class CampaignWorkerInstance:
                 success = False
                 err_msg = ""
                 message_id = f"msg_{self.campaign_id}_{recipient.id}_{int(time.time())}"
+                provider_message_id = None
+                provider_response = None
 
                 attempt = 0
                 while attempt <= max_retries and not success and not self.stop_event.is_set():
@@ -158,6 +160,9 @@ class CampaignWorkerInstance:
                                     attempt = max_retries + 1
                                 raise RuntimeError(getattr(result, "message", None) or "Send failed")
 
+                        provider_message_id = getattr(result, "message_id", None) if result is not None else None
+                        provider_response = getattr(result, "message", None) if result is not None else None
+
                         success = True
                     except Exception as ex:
                         attempt += 1
@@ -177,7 +182,8 @@ class CampaignWorkerInstance:
                         sender_name=sender_name,
                         provider=account.provider,
                         status="success",
-                        message_id=message_id,
+                        message_id=provider_message_id,
+                        error_info=provider_response,
                     )
                     db.add(d_log)
                     db.flush()
@@ -200,7 +206,7 @@ class CampaignWorkerInstance:
                             account_name=account.name,
                             status="SENT",
                             provider_type=account.provider,
-                            provider_message_id=message_id,
+                            provider_message_id=provider_message_id,
                             campaign_id=campaign.id,
                         )
                     )

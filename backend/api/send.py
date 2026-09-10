@@ -307,7 +307,7 @@ def send_email_message(
                 provider=provider_type,
                 status="success",
                 message_id=provider_message_id,
-                error_info=None,
+                error_info=message_val,
             )
         )
         _safe_add_activity_log(

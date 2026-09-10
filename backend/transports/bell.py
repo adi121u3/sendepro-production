@@ -22,6 +22,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import smtplib
 import ssl
 import logging
+import re
 import socket
 from backend.transports.base import BaseTransport, DeliveryResult
 from backend.transports.mime_builder import build_outbound_message, message_as_bytes
@@ -44,10 +45,9 @@ class BellEndpoint:
         return f"{self.host}:{self.port}/{self.security}"
 
 
-# Official host only. Port 587 first, then 25 (Bell docs).
+# Authenticated client submission uses STARTTLS on port 587.
 BELL_FALLBACKS: List[BellEndpoint] = [
     BellEndpoint("smtphm.sympatico.ca", 587, "starttls"),
-    BellEndpoint("smtphm.sympatico.ca", 25, "starttls"),
 ]
 
 NETWORK_BLOCK_HINT = (
@@ -282,14 +282,40 @@ class BellSympaticoTransport(BaseTransport):
             )
 
         try:
-            server.sendmail(self.from_email, [to_email], message_as_bytes(msg))
+            mail_code, mail_reply = server.mail(self.from_email)
+            if mail_code not in {250, 251}:
+                raise smtplib.SMTPSenderRefused(mail_code, mail_reply, self.from_email)
+
+            rcpt_code, rcpt_reply = server.rcpt(to_email)
+            if rcpt_code not in {250, 251}:
+                raise smtplib.SMTPRecipientsRefused({to_email: (rcpt_code, rcpt_reply)})
+
+            data_code, data_reply = server.data(message_as_bytes(msg))
+            if data_code != 250:
+                raise smtplib.SMTPDataError(data_code, data_reply)
+
+            reply_text = (
+                data_reply.decode("utf-8", errors="replace")
+                if isinstance(data_reply, (bytes, bytearray))
+                else str(data_reply or "")
+            ).strip()
+            queue_match = re.search(
+                r"(?:queued\s+as|queue(?:d)?(?:\s+id)?[=: ]+)\s*<?([A-Za-z0-9._-]{4,})>?",
+                reply_text,
+                flags=re.IGNORECASE,
+            )
+            provider_message_id = queue_match.group(1) if queue_match else None
             try:
                 server.quit()
             except Exception:
                 pass
             return self.success_result(
                 status="SENT",
-                message=f"Email sent via Bell Sympatico ({label}).",
+                message=(
+                    f"Bell accepted the message for {to_email} via {label}. "
+                    f"SMTP response: {data_code} {reply_text or 'OK'}. Final delivery is not yet verified."
+                ),
+                message_id=provider_message_id,
             )
         except Exception as exc:
             try:
