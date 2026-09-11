@@ -104,17 +104,20 @@ def send_email_message(
     provider_type = str(account.provider or "smtp").strip().lower()
 
     lead = db.query(Lead).filter(Lead.email == recipient).first()
-    if not lead:
-        raise HTTPException(status_code=400, detail="Recipient is not in Leads. Add the lead before sending so its sender name can be used.")
-    # A direct compose may override the display name for this message. If it is
-    # blank, fall back to the sender name stored on the matching Lead.
+    # Direct sends should not require the recipient to already exist in Leads.
+    # The payload's from_name is the first choice, then the matching Lead's
+    # sender name, and finally the account's saved display name.
     effective_from_name = (
         from_name
         or str(getattr(lead, "sender_name", None) or "").strip()
         or str(getattr(lead, "sender_full_name", None) or "").strip()
+        or str(getattr(account, "from_name", None) or "").strip()
     )
     if not effective_from_name:
-        raise HTTPException(status_code=400, detail="This lead has no Sender Name. Add one in Leads before sending.")
+        raise HTTPException(
+            status_code=400,
+            detail="No sender name is available. Set the From Name or configure the account's default sender name.",
+        )
     if "@" in effective_from_name:
         raise HTTPException(status_code=400, detail="The From Name looks like an email address. Enter a person's or business name, not an email address.")
 
@@ -196,6 +199,35 @@ def send_email_message(
             if not _is_success(result) and getattr(result, "retryable", False):
                 from backend.transports.google_smtp import GmailSmtpOAuthTransport
                 result = GmailSmtpOAuthTransport(transport.access_token, account.email, effective_from_name).send_email(to_email=recipient, subject=subject, html_body=body, high_priority=high_priority, reply_to=reply_to)
+
+        elif provider_type == "agentmail":
+            if not cred or not cred.agentmail_api_key_enc:
+                raise HTTPException(status_code=400, detail="AgentMail API key is missing.")
+            from backend.transports.agentmail import AgentMailTransport
+
+            api_key = decrypt_credential(cred.agentmail_api_key_enc)
+            if not api_key:
+                raise HTTPException(status_code=400, detail="AgentMail API key could not be decrypted.")
+            inbox_id = (getattr(account, "agentmail_inbox_id", None) or "").strip()
+            if not inbox_id:
+                raise HTTPException(status_code=400, detail="AgentMail inbox ID is missing. Store the inbox ID for this account before sending.")
+            transport = AgentMailTransport(
+                {
+                    "from_email": account.email,
+                    "from_name": effective_from_name,
+                    "api_key": api_key,
+                    "inbox_id": inbox_id,
+                    "base_url": "https://api.agentmail.to",
+                    "reply_to": reply_to or "",
+                }
+            )
+            result = transport.send_email(
+                to_email=recipient,
+                subject=subject,
+                html_body=body,
+                high_priority=high_priority,
+                reply_to=reply_to,
+            )
 
         elif provider_type == "zeptomail":
             if not cred or not cred.zeptomail_api_key_enc:
